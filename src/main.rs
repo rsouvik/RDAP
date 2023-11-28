@@ -30,7 +30,10 @@ use syn::synom::Parser;
 use once_cell::sync::Lazy;
 use lazy_static::lazy_static;
 use std::{fs::File, io::Write, process::exit};
+use futures::{io, AsyncBufReadExt};
+use anyhow::Ok;
 
+use anyhow::Result;
 type resources = Vec<ResourceReq>;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -161,7 +164,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let request_response = request_response::cbor::Behaviour::new(
                 [(
-                    StreamProtocol::new("/model-exchange/1"),
+                    StreamProtocol::new("/resource-exchange/1"),
                     ProtocolSupport::Full,
                 )],
                 request_response::Config::default(),
@@ -190,7 +193,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Enter messages via STDIN and they will be sent to connected peers using Gossipsub");
 
-    // Kick it off
     loop {
         select! {
             Ok(Some(line)) = stdin.next_line() => {
@@ -205,182 +207,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 _ => {error!("unknown $command"); info!("Command is {:?}",line.as_str());}
                 }
             }
-            event = swarm.select_next_some() => match event {
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered a new peer: {peer_id}");
-                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                    }
-                },
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS discover peer has expired: {peer_id}");
-                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                    }
-                },
-                //request response
-                SwarmEvent::Behaviour(MyBehaviourEvent::RequestResponse(
-                request_response::Event::Message { peer, message, .. },
-                ))  => match message {
-                    request_response::Message::Request {
-                        request, channel, ..
-                    } => {
-                        println!( "Got message {:?} in request_response from : {:?}",request,peer);
-                        match request.mode {
-                            ListMode::ModelSpecsReq(ref spec_req) => {
-
-                                let mreq = r#"{"id":1,"parameters":"picxelate","public":false}"#;
-
-                                let req =
-                                    ListRequest {
-                                        mode: ListMode::ModelConfReq(mreq.to_string()),
-                                    };
-                                    swarm
-                                        .behaviour_mut()
-                                        .request_response
-                                        .send_request(&peer, req);
-
-                            }
-
-                            ListMode::ModelConfReq(ref spec_req) => {
-
-                                if let Ok(mre) = serde_json::from_slice::<ModelReq>(&spec_req.as_bytes()) {
-                                    println!( "Location: {:?}",mre.parameters);
-                                    match gen_model_response(&mre).await {
-                                        Ok(()) => {
-                                            println!( "Model generated locally at peer {:?}",swarm.local_peer_id().to_string());
-                                        }
-                                        Err(e) => error!("error generating model, {}", e),
-                                    }
-                                }
-
-                            }
-
-
-                            _ => {}
-                        }
-                    }
-                    request_response::Message::Response {
-                        request_id,
-                        response,
-                    } => {
-
-                    }
-                    }
-
-
-
-
-                 /*=> {
-                        println!( "Got message {:?} in request_response from : {:?}",message,peer);
-                        //Check for req-res events
-                        //ModelSpecsReq
-                        if let Ok(req) = serde_json::from_slice::<ListRequest>(&message.Request.request) {
-
-                        }
-                      }*/
-                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                    propagation_source: peer_id,
-                    message_id: id,
-                    message,
-                })) =>
-                        {
-
-                            println!(
-                            "Got message: '{}' with id: {id} from peer: {peer_id}",
-                            String::from_utf8_lossy(&message.data));
-
-                            if let Ok(resp) = serde_json::from_slice::<ListResponse>(&message.data) {
-                                //if resp.receiver == PEER_ID.to_string() {
-                                if resp.receiver == swarm.local_peer_id().to_string() {
-
-                                    info!("Response from {:?}:", peer_id);
-                                    resp.data.iter().for_each(|r| info!("{:?}", r));
-                                }
-                            }
-                            else if let Ok(req) = serde_json::from_slice::<ListRequest>(&message.data) {   //deserialize here
-                                match req.mode {
-                                    ListMode::ALL => {
-                                        info!("Received ALL req: {:?} from {:?}", req, message.source);
-                                        //respond_with_public_models(&mut swarm, response_sender.clone(),peer_id.to_string());
-                                        //respond_with_public_models(&mut swarm, response_sender.clone(),peer_id);
-
-                                    }
-                                    ListMode::One(ref peer_id_dest) => {
-                                        if *peer_id_dest == swarm.local_peer_id().to_string() {
-                                            info!("Received req: {:?} from {:?}", req, message.source);
-                                            info!("Sending req: {:?} back to: {:?}", req, message.source);
-                                            info!("Sending req: {:?} back to peer: {:?}", req, peer_id.to_string());
-                                            /*respond_with_public_models(&mut swarm,
-                                                response_sender.clone(),
-                                                //msg.source.to_string(),
-                                                //peer_id.to_string()
-                                                peer_id
-                                            );*/
-                                            match read_local_resources().await {
-                                                Ok(v) => {
-                                                    info!("Local resources ({})", v.len());
-                                                    v.iter().for_each(|r| info!("{:?}", r));
-                                                }
-                                                Err(e) => error!("error fetching local resources: {}", e),
-                                            };
-                                            let req = ListRequest {
-                                                    mode: ListMode::ALL,
-                                            };
-                                            swarm
-                                                .behaviour_mut()
-                                                .request_response
-                                                .send_request(&peer_id, req);
-                                        }
-                                    }
-                                    ListMode::Model(ref modelReq) => {
-
-                                    }
-                                    ListMode::ModelSpecs(ref modelReq) => {
-                                        //if modelReq == swarm.local_peer_id().capacity()
-                                        //then send ModelSpecsReq through reqres
-                                        match resources_available_for_request(modelReq).await {
-
-                                            Ok(v) => {
-                                                if v == true {
-                                                    //send modelspecsreq from prover to verifier
-                                                    //let req = ListRequest {
-                                                    //mode: ListMode::ALL,
-                                                     //};
-
-                                                     let req = ListRequest {
-                                                        mode: ListMode::ModelSpecsReq(modelReq.to_owned()),
-                                                     };
-                                                    swarm
-                                                        .behaviour_mut()
-                                                        .request_response
-                                                        .send_request(&peer_id, req);
-                                                }
-                                            }
-                                            Err(e) => error!("error fetching local resources: {}", e),
-                                        }
-                                    }
-                                    //not part of gossip, move to req-response
-                                    ListMode::ModelSpecsReq(ref modelReq) => {
-
-                                    }
-                                    _ => ()
-
-                                }
-                             }
-
-                /*if let Err(e) = swarm
-                    .behaviour_mut().gossipsub
-                    .publish(topic.clone(), (String::from_utf8_lossy(&message.data)+"now").as_bytes()) {
-                    println!("Publish error: {e:?}");
-                }*/
-
-                        },
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Local node is listening on {address}");
-                }
-                _ => {}
+            _ => ()
             }
-        }
     }
 }
