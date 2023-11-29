@@ -36,7 +36,7 @@ use aws_sdk_s3 as s3;
 use tensorflow::{Graph, SavedModelBundle, SessionOptions, SessionRunArgs, Tensor, Status};
 use anyhow::Result;
 
-mod KTensor;
+//mod KTensor;
 
 const STORAGE_FILE_PATH: &str = "./models.json";
 const AVAILABILITY_FILE_PATH: &str = "./resources.json";
